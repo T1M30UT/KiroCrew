@@ -265,6 +265,7 @@ if TYPE_CHECKING:  # every owner-defined name in _EXPORTS, for type checkers and
         _routing_option_value_targets_self,
         _splice_static_substitutions,
         _ssh_family_verb,
+        _ssh_family_verbs,
         _ssh_reading_depth,
         _ssh_verb_basename,
         _unmask_separators,

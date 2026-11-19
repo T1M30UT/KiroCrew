@@ -22,6 +22,7 @@ import contextvars
 import fnmatch
 import functools
 import re
+from collections.abc import Iterator
 from typing import Callable
 
 # The reader names a test instruments on the facade are reached as attributes of
@@ -641,21 +642,71 @@ def _ssh_verb_basename(token: str) -> str:
     return base[: -len(".exe")] if base.endswith(".exe") else base
 
 
-def _ssh_family_verb(token: str) -> "str | None":
-    """The ssh-family verb *token* invokes, or None.
+def _ssh_family_verbs(token: str) -> "tuple[str, ...]":
+    """Every ssh-family verb *token* can invoke, in sorted order; empty if none.
 
     Path-qualified (``/usr/bin/ssh``) and Windows (``ssh.exe``) spellings
     resolve to the bare verb.  A glob basename that CAN expand to one
-    (``s?h``, see ``_GLOB_CHARS``) resolves to the verb it can name.
+    (``s?h``, see ``_GLOB_CHARS``) resolves to every verb it can name:
+    ``s??`` names ``scp`` and ``ssh``, and the walk judges the line as each.
+    The order is fixed, so no verdict follows the per-process hash seed.
     """
     base = _ssh_verb_basename(token)
     if base in _SSH_FAMILY_VERBS:
-        return base
-    if _GLOB_CHARS.intersection(base):
-        for verb in _SSH_FAMILY_VERBS:
-            if fnmatch.fnmatchcase(verb, base) or fnmatch.fnmatchcase(verb + ".exe", base):
-                return verb
-    return None
+        return (base,)
+    if not _GLOB_CHARS.intersection(base):
+        return ()
+    return tuple(
+        verb
+        for verb in sorted(_SSH_FAMILY_VERBS)
+        if fnmatch.fnmatchcase(verb, base) or fnmatch.fnmatchcase(verb + ".exe", base)
+    )
+
+
+def _ssh_family_verb(token: str) -> "str | None":
+    """The first verb ``_ssh_family_verbs`` gives for *token*, or None."""
+    verbs = _ssh_family_verbs(token)
+    return verbs[0] if verbs else None
+
+
+def _frame_verb_choices(
+    tokens: "list[str]", executed: "set[int]", bound: "dict[str, tuple[str, ...]]"
+) -> "Iterator[tuple[int, str, str | None, bool]]":
+    """``(index, token, verb, glob_verb)`` per token, once per verb it can be.
+
+    A token that names no verb comes once with ``None``.  A glob that names
+    several (``s??``) comes once per verb, so its operands are judged under
+    each, toward deny.  Lazy on purpose: a copy that the walk binds in *bound*
+    at one token applies to the tokens after it.
+
+    A glob that bash does not run and that ends its command (``git add *;
+    curl localhost:3000``) is that command's last operand, not an ssh verb
+    whose operand scan would run on past the ``;``.  ``glob_verb`` marks a
+    bare glob verb: one that bash RUNS (program position, or the program a
+    wrapper runs, ``env s?h``) keeps host glob matching for its operands
+    (``local*``); the same glob as another program's operand (``tar … s* *.*``)
+    is a filename, so a glob after it is not read as this host.  Two wildcard
+    words in a row are every five-field cron schedule (``0 * * * *``).  A verb
+    glob with a directory part (``/usr/bin/s?h``) expands outside the working
+    directory, so its operands keep glob host matching, and a word of only
+    ``*`` keeps the filename reading wherever it sits (``* * * * * root …``).
+    """
+    for i, token in enumerate(tokens):
+        verbs = _ssh_family_verbs(token)
+        globbed = bool(verbs) and _ssh_verb_basename(token) not in verbs
+        if globbed and i not in executed and token.endswith((";", "|")):
+            verbs = ()
+        glob_verb = (
+            bool(verbs)
+            and globbed
+            and not any(sep in token for sep in "/\\")
+            and (i not in executed or not token.strip("*"))
+        )
+        if not verbs and bound:
+            stripped = token.strip("\"'")
+            verbs = bound.get(stripped, ()) or bound.get(_program_basename(stripped), ())
+        for verb in verbs or (None,):
+            yield i, token, verb, glob_verb
 
 
 # ssh_config keywords that SET the destination.  ``-o hostname=…`` rewrites
@@ -1147,7 +1198,7 @@ def _judge_ssh_to_self(text_lower: str, own_line: bool, raw_text: "str | None" =
     # an ssh-family binary, bound to the verb they now carry.  Shared across
     # frames (a copy staged in a wrapper payload reaches its siblings); a
     # copy staged in an EARLIER command line is the documented residual.
-    bound_program_verbs: "dict[str, str]" = {}
+    bound_program_verbs: "dict[str, tuple[str, ...]]" = {}
     frames = _self_token_frames(text_lower, literal)
     # A wrapper's option words are read in the case they were written in
     # (``sudo -H`` takes no value, ``sudo -h`` does), so the caller's own line
@@ -1206,43 +1257,9 @@ def _judge_ssh_to_self(text_lower: str, own_line: bool, raw_text: "str | None" =
         xargs_prefix_index: "int | None" = None  # a bare ``xargs`` in this simple command
         # Once per FRAME, not once per verb token: see ``_is_credential_mint``.
         disqualified: "bool | None" = None
-        for i, token in enumerate(tokens):
-            verb = _ssh_family_verb(token)
-            # A glob that bash does not run and that ends its command (``git add
-            # *; curl localhost:3000``) is that command's last operand, not an
-            # ssh verb whose operand scan would run on past the ``;``.
-            if (
-                verb is not None
-                and _ssh_verb_basename(token) != verb
-                and i not in executed
-                and token.endswith((";", "|"))
-            ):
-                verb = None
-            # A bare glob (``s?h``) that bash RUNS -- program
-            # position, or the program a wrapper runs (``env s?h``) -- is an ssh
-            # verb whose glob operands (``local*``) keep host glob matching.  The
-            # same glob as another program's operand (``tar … s* *.*``,
-            # ``find s* l*``) is a filename: it already spends the one filesystem
-            # expansion this floor models, so a glob after it is not read as this
-            # host.  Two wildcard words in a row are every five-field cron
-            # schedule (``0 * * * *``), and a working directory that expands both
-            # into a self connection also makes a lone ``*`` that whole command
-            # line, which no static floor reads.  A verb glob with a directory part
-            # (``/usr/bin/s?h``) expands outside it, so its operands keep glob
-            # host matching.  A word of only ``*`` keeps the filename reading
-            # wherever it sits: it is the field of a cron schedule
-            # (``* * * * * root …``) far more often than a program.
-            glob_verb = (
-                verb is not None
-                and _ssh_verb_basename(token) != verb
-                and not any(sep in token for sep in "/\\")
-                and (i not in executed or not token.strip("*"))
-            )
-            if verb is None and bound_program_verbs:
-                stripped_prog = token.strip("\"'")
-                verb = bound_program_verbs.get(stripped_prog) or bound_program_verbs.get(
-                    _program_basename(stripped_prog)
-                )
+        # A glob verb (``s??``) comes once per verb it can name, so the line
+        # is judged as each; the verb branch keeps no state across tokens.
+        for i, token, verb, glob_verb in _frame_verb_choices(tokens, executed, bound_program_verbs):
             if verb is None:
                 stripped_tok = token.strip("\"'")
                 assign = _RSYNC_RSH_ASSIGN_RE.match(stripped_tok)
@@ -1309,11 +1326,11 @@ def _judge_ssh_to_self(text_lower: str, own_line: bool, raw_text: "str | None" =
                         operands.append(peeked)
                     if len(operands) >= 2:
                         for source in operands[:-1]:
-                            bound_verb = _ssh_family_verb(source)
-                            if bound_verb is not None:
+                            bound_verbs = _ssh_family_verbs(source)
+                            if bound_verbs:
                                 dest = operands[-1]
-                                bound_program_verbs[dest] = bound_verb
-                                bound_program_verbs[_program_basename(dest)] = bound_verb
+                                bound_program_verbs[dest] = bound_verbs
+                                bound_program_verbs[_program_basename(dest)] = bound_verbs
                                 break
                 cmd_start = _ends_argv(token) or (
                     cmd_start and _ENV_ASSIGN_PREFIX_RE.match(stripped_tok) is not None

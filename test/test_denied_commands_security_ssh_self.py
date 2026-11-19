@@ -10,7 +10,10 @@ compared against is pinned by ``TestSandboxEscapeSshSelfOwnHost`` in
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -26,6 +29,7 @@ from kiro_crew.security import BUILTIN_DENIED_RULES
 from kiro_crew.security import argv_floor as _argv_floor
 from kiro_crew.security import compute_effective_denied, is_denied, is_safe_user_regex
 from kiro_crew.security.call_views import _CALL_VIEWS, sharing_views
+from kiro_crew.testing.wait import FALLBACK_TIMEOUT_SECS
 
 # Each test starts with the macOS libc and libproc handle caches unbuilt and puts them
 # back after, as every test of the test_denied_commands_security family does (see conftest.py).
@@ -1028,6 +1032,83 @@ class TestSandboxEscapeSshSelf:
         # ssh-family program must not slip the verb gate.
         assert _denied_by("/usr/bin/s?h localhost id") == self._RULE
         assert _denied_by("/usr/bin/s?h remote.example.com id") is None
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            # ``s??`` names scp and ssh: as scp, ``localhost`` is a target.
+            "/usr/bin/s?? x localhost",
+            "s?? x localhost",
+            "s??.exe x localhost",
+            # ``s*`` names scp, sftp and ssh.
+            "/usr/bin/s* x ::1",
+            "s* far.example localhost",
+            # ``[rs]s*`` names rsync and ssh: as rsync, every operand is checked.
+            "/usr/bin/[rs]s* x localhost",
+            # A copy of a multi-verb glob binary carries every verb it can name.
+            "cp /usr/bin/s?? /tmp/q && /tmp/q x localhost",
+        ],
+    )
+    def test_glob_naming_several_verbs_is_judged_as_every_verb(self, cmd):
+        # The verbs check different operands, so reading the glob as one
+        # arbitrary verb would let the others through.
+        assert _denied_by(cmd) == self._RULE
+
+    @pytest.mark.parametrize(
+        "cmd",
+        [
+            "/usr/bin/s?? remote.example.com id",
+            "/usr/bin/s* remote.example.com uptime",
+            "ls *",
+            "cp * /backup/",
+        ],
+    )
+    def test_glob_naming_several_verbs_stays_allowed_off_this_host(self, cmd):
+        assert _denied_by(cmd) is None
+
+    def test_glob_verbs_are_every_verb_in_sorted_order(self):
+        assert _argv_floor._ssh_family_verbs("/usr/bin/s??") == ("scp", "ssh")
+        assert _argv_floor._ssh_family_verbs("*") == ("rsync", "scp", "sftp", "ssh")
+        assert _argv_floor._ssh_family_verbs("/usr/bin/ssh.exe") == ("ssh",)
+        assert _argv_floor._ssh_family_verbs("l?") == ()
+        # The single-verb answer is the first in sorted order, never a set's.
+        assert _argv_floor._ssh_family_verb("s??") == "scp"
+        assert _argv_floor._ssh_family_verb("l?") is None
+
+    def test_glob_verb_verdict_does_not_depend_on_the_hash_seed(self, tmp_path):
+        # frozenset order follows PYTHONHASHSEED, which is fixed per process,
+        # so only fresh interpreters with different seeds show an
+        # order-dependent verdict.  Before the fix, seeds 0 and 3 disagreed
+        # on the first two lines.  DNS is stubbed: no lookup leaves the host.
+        script = (
+            "import json, sys\n"
+            "from kiro_crew.security import argv_floor\n"
+            "argv_floor._OWN_HOST_NAMES_CACHE = frozenset()\n"
+            "argv_floor._OWN_HOST_RESOLVE_DONE = True\n"
+            "argv_floor._NETLINK_ADDRS_PUBLISHED = True\n"
+            "argv_floor._OWN_HOST_RESOLVE_NEXT_TRY = float('inf')\n"
+            "argv_floor._resolved_host_verdict = lambda host, **_kw: False\n"
+            "print(json.dumps([argv_floor._is_ssh_to_self(c) for c in sys.argv[1:]]))\n"
+        )
+        cmds = [
+            "/usr/bin/s?? x localhost",
+            "s* far.example localhost",
+            "git add s* README.md",
+            "/usr/bin/s?? remote.example.com id",
+        ]
+        for seed in range(6):
+            result = subprocess.run(
+                [sys.executable, "-c", script, *cmds],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                timeout=FALLBACK_TIMEOUT_SECS,
+                cwd=str(tmp_path),
+                env={**os.environ, "PYTHONHASHSEED": str(seed)},
+            )
+            assert result.returncode == 0, result.stderr
+            verdicts = json.loads(result.stdout.strip().splitlines()[-1])
+            assert verdicts == [True, True, False, False], seed
 
     def test_glob_expandable_self_operand_is_denied(self):
         # The same expansion applies to operands: ``localho?t`` matches a
