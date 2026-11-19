@@ -33,8 +33,35 @@ describe('HoverTip', () => {
 
   it('opens synchronously on keyboard focus', () => {
     render(<HoverTip label="Copy"><button type="button">C</button></HoverTip>)
-    fireEvent.focus(screen.getByRole('button'))
+    act(() => { screen.getByRole('button').focus() })
     expect(screen.getByRole('tooltip')).toHaveTextContent('Copy')
+  })
+
+  it('paints nothing on a focus the browser would not ring, such as a dialog handing focus back after a mouse close', () => {
+    render(<HoverTip label="Kiro account & credits"><button type="button">K</button></HoverTip>)
+    const btn = screen.getByRole('button')
+    const matches = btn.matches.bind(btn)
+    vi.spyOn(btn, 'matches').mockImplementation(sel => sel === ':focus-visible' ? false : matches(sel))
+    act(() => { btn.focus() })
+    expect(screen.queryByRole('tooltip')).toBeNull()
+  })
+
+  it('without a label, leaves the control as it is inside the same wrapper', () => {
+    const { rerender } = render(<HoverTip label="Click to hide"><button type="button">M</button></HoverTip>)
+    const btn = screen.getByRole('button')
+    fireEvent.mouseEnter(btn.parentElement as HTMLElement)
+    act(() => { vi.advanceTimersByTime(OPEN_DELAY_MS) })
+    expect(screen.getByRole('tooltip')).toHaveTextContent('Click to hide')
+    rerender(<HoverTip><button type="button" aria-describedby="card">M</button></HoverTip>)
+    expect(screen.getByRole('button')).toBe(btn)
+    expect(btn).toHaveAttribute('aria-describedby', 'card')
+    expect(btn.parentElement).toHaveAttribute('data-hover-tip')
+    expect(screen.queryByRole('tooltip')).toBeNull()
+    // The pointer leaves while no hint shows, so the hint coming back stays
+    // closed instead of reopening where the pointer no longer is.
+    fireEvent.mouseLeave(btn.parentElement as HTMLElement)
+    rerender(<HoverTip label="Click to hide"><button type="button">M</button></HoverTip>)
+    expect(screen.queryByRole('tooltip')).toBeNull()
   })
 })
 
