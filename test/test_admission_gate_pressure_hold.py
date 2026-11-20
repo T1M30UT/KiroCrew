@@ -1275,7 +1275,7 @@ class TestSpawnAdmissionGatePressureHold(_TestSpawnAdmissionGateHarness):
 
         for name in ("LINUX", "WINDOWS", "MACOS"):
             monkeypatch.setattr(platform_compat, "IS_" + name, name == "MACOS")
-        monkeypatch.setattr(subagent_mod, "_host_available_gb", lambda: -1.0)
+        monkeypatch.setattr(subagent_mod, "_macos_available_memory_gb", lambda: -1.0)
         mgr = self._mgr()
         self._busy(mgr)
         self._level(monkeypatch, 2)
@@ -1299,7 +1299,7 @@ class TestSpawnAdmissionGatePressureHold(_TestSpawnAdmissionGateHarness):
         for name in ("LINUX", "WINDOWS", "MACOS"):
             monkeypatch.setattr(platform_compat, "IS_" + name, name == "MACOS")
         # 8 GB reclaimable clears the 4.0 GB floor plus warming-start reserves.
-        monkeypatch.setattr(subagent_mod, "_host_available_gb", lambda: 8.0)
+        monkeypatch.setattr(subagent_mod, "_macos_available_memory_gb", lambda: 8.0)
         self._level(monkeypatch, platform_compat.MEMORY_PRESSURE_WARN)
         mgr = self._mgr()
         self._busy(mgr)
@@ -1307,6 +1307,28 @@ class TestSpawnAdmissionGatePressureHold(_TestSpawnAdmissionGateHarness):
         assert info is not None and info.queued is True
         assert info.queued_reason == "memory_pressure"
         assert events[-1]["reason"] == "memory_pressure"
+
+    def test_a_pressured_macs_first_start_is_admitted_when_nothing_of_ours_runs(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """By design: the hold applies only while one of our dedicated runtimes
+        runs, so a Mac at WARN whose figure clears the floor still starts its
+        first sub-agent. Only the floor guards that start."""
+        import kiro_crew.subagent as subagent_mod
+        from kiro_crew import platform_compat
+        from kiro_crew.constants import DEFAULT_SPAWN_MIN_MEMORY_GB
+
+        for name in ("LINUX", "WINDOWS", "MACOS"):
+            monkeypatch.setattr(platform_compat, "IS_" + name, name == "MACOS")
+        monkeypatch.setattr(subagent_mod, "_macos_available_memory_gb", lambda: 8.0)
+        self._level(monkeypatch, platform_compat.MEMORY_PRESSURE_WARN)
+        mgr = self._mgr()
+        info, _events, mock_sel = self._spawn_capturing_queued(
+            mgr, floor_gb=DEFAULT_SPAWN_MIN_MEMORY_GB
+        )
+        assert info is not None and info.queued is False
+        assert info.queued_reason != "memory_pressure"
+        assert "deferred_memory_pressure" not in self._outcomes(mock_sel)
 
     def test_the_pump_keeps_a_held_row_in_the_window_without_a_defer(
         self, monkeypatch: pytest.MonkeyPatch
