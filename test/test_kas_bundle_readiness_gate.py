@@ -513,9 +513,9 @@ class TestGate:
     @pytest.mark.asyncio
     async def test_harness_turn_passes_on_crew_signin_without_probing_kiro_cli(self):
         service = _signed_out_service()
-        ready = AsyncMock(return_value=True)
+        ready = AsyncMock(return_value=kiro_readiness.KAS_TURN_READY)
         with (
-            patch.object(kiro_readiness, "kas_crew_signin_ready", ready),
+            patch.object(kiro_readiness, "kas_turn_verdict", ready),
             patch.object(_SignedOutService, "verified_ready", AsyncMock(return_value=False)) as vr,
         ):
             assert (
@@ -530,8 +530,9 @@ class TestGate:
         ready.assert_awaited_once_with(_MEMBER_KEY, None, config=None)
 
     @pytest.mark.asyncio
-    async def test_harness_turn_without_crew_signin_falls_back_to_kiro_cli(self):
-        with patch.object(kiro_readiness, "kas_crew_signin_ready", AsyncMock(return_value=False)):
+    async def test_harness_turn_off_the_kas_route_falls_back_to_kiro_cli(self):
+        verdict = AsyncMock(return_value=kiro_readiness.KAS_TURN_NOT_KAS_ROUTE)
+        with patch.object(kiro_readiness, "kas_turn_verdict", verdict):
             resp = await kiro_readiness.reject_if_kiro_unverified(
                 _request(_signed_out_service()), harness_turn=True
             )
@@ -540,8 +541,8 @@ class TestGate:
 
     @pytest.mark.asyncio
     async def test_default_caller_never_consults_the_crew_signin(self):
-        ready = AsyncMock(return_value=True)
-        with patch.object(kiro_readiness, "kas_crew_signin_ready", ready):
+        ready = AsyncMock(return_value=kiro_readiness.KAS_TURN_READY)
+        with patch.object(kiro_readiness, "kas_turn_verdict", ready):
             resp = await kiro_readiness.reject_if_kiro_unverified(_request(_signed_out_service()))
         assert resp is not None and resp.status == 503
         ready.assert_not_called()
@@ -670,10 +671,10 @@ async def test_chat_completions_for_a_new_slot_gates_on_its_own_session(state):
 async def test_api_models_off_the_bundle_route_never_consults_the_crew_signin():
     # Off the bundle route the catalog is kiro-cli's own --list-models output,
     # so a Crew sign-in must not open the spawn path.
-    ready = AsyncMock(return_value=True)
+    ready = AsyncMock(return_value=kiro_readiness.KAS_TURN_READY)
     with (
         patch(_ROUTE, return_value=False),
-        patch.object(kiro_readiness, "kas_crew_signin_ready", ready),
+        patch.object(kiro_readiness, "kas_turn_verdict", ready),
         patch(_RESOLVE_TARGET, AsyncMock(return_value="/usr/bin/kiro-cli")) as resolve,
     ):
         resp = await agents.api_models(_request(_signed_out_service()))
