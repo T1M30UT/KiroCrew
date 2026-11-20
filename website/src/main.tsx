@@ -16,6 +16,7 @@ import { startMemoryWatch } from './lib/memoryWatch'
 import './dev/slowFrameLog'
 import React, { StrictMode, Suspense, lazy, startTransition } from 'react'
 import { createRoot } from 'react-dom/client'
+import { announceRelayPanePainted } from './lib/relayPanePainted'
 import { withCommitProfiler, installCommitProfilerConsoleApi } from './lib/commitProfiler'
 import { Provider } from 'react-redux'
 import { BrowserRouter, Routes, Route } from 'react-router-dom'
@@ -343,7 +344,9 @@ function boot(startSync: boolean): void {
   // definition for how the language is reconciled first).
   void catalogReady.then(() => {
     announceBoot('render')
-    const root = createRoot(document.getElementById('root')!)
+    const rootEl = document.getElementById('root')!
+    const root = createRoot(rootEl)
+    announceRelayPanePainted(rootEl)
     // The first render of the whole app is one long task when it runs
     // synchronously. As a transition React renders it in slices and yields
     // to the browser between them. Nothing is on screen to keep responsive yet,

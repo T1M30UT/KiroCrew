@@ -484,6 +484,32 @@ function paneChordIndex(input, platform) {
   return digit >= 1 && digit <= PANE_CHORD_DIGITS ? digit - 1 : -1;
 }
 
+// The console line a relay Crew's page prints once it has drawn the app
+// (website/src/lib/relayPanePainted.ts holds the same string). Any page could
+// print it; all it decides is when that page's own pane shows.
+const RELAY_PANE_PAINTED = "kirocrew:relay-pane-painted";
+// A page that never prints it (a host on an older build) shows once its root
+// holds text, read every PANE_ROOT_PROBE_MS after its load, or this long after
+// that load at the latest.
+const PANE_PAINT_BACKSTOP_MS = 3000;
+const PANE_ROOT_PROBE_MS = 100;
+const PANE_ROOT_PROBE = "(() => { const r = document.getElementById(\"root\"); "
+  + "return !!r && r.childElementCount > 0 && r.textContent.trim() !== \"\"; })()";
+// The cover stays under a pane that has just shown, which is clear until its
+// first frame lands. shortcut: a fixed wait, not the frame itself; main sees no
+// composite event for an on-screen view.
+const PANE_COVER_HANDOFF_MS = 250;
+
+// Whether a page's theme colour (`did-change-theme-color`, Chromium's `#rrggbb`
+// from the page's own theme-color meta tag) is a dark one, or null for none or
+// anything else. Only this boolean leaves main: the page's own words never do.
+function isDarkThemeColor(color) {
+  const m = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(typeof color === "string" ? color : "");
+  if (!m) return null;
+  const [r, g, b] = m.slice(1).map((h) => parseInt(h, 16));
+  return 0.2126 * r + 0.7152 * g + 0.0722 * b < 128;
+}
+
 // shortcut: one pane per Crew, and none while the Crew is open in a window:
 // both would use the Crew's one partition.
 const openPanes = new Map();
@@ -514,8 +540,19 @@ function openRelayCrewPane({ endpointId, crewUrl, relayDomain, getToken, parent,
   let parentAway = false;
   let reportedHidden = false;
   view.setVisible(false);
+  // Clear until the page draws, so the cover under it shows instead of the view's own black.
+  view.setBackgroundColor("#00000000");
   parent.contentView.addChildView(view);
   const chordListeners = [];
+  const themeListeners = [];
+  const loadedListeners = [];
+  // The page has drawn the app (or failed to load, or a notice took its place).
+  // Until then the pane stays hidden, so the dashboard's connecting cover shows
+  // instead of the empty view's black.
+  let loaded = false;
+  let backstop = null;
+  let probe = null;
+  let handoff = null;
   // The notice view (which focuses its own button) reads the chord too, so
   // the keyboard can leave a tab that shows one.
   const readChord = (event, input) => {
@@ -525,7 +562,7 @@ function openRelayCrewPane({ endpointId, crewUrl, relayDomain, getToken, parent,
     crew.notify(chordListeners, index);
   };
   const crew = attachRelayCrew({ endpointId, ...parts }, {
-    add: (v) => { parent.contentView.addChildView(v); v.setVisible(shown); v.webContents.on("before-input-event", readChord); },
+    add: (v) => { parent.contentView.addChildView(v); markLoaded(); v.setVisible(shown); v.webContents.on("before-input-event", readChord); },
     remove: (v) => parent.contentView.removeChildView(v),
     place: (v) => { if (rect) v.setBounds(rect); },
   }, deps);
@@ -545,7 +582,7 @@ function openRelayCrewPane({ endpointId, crewUrl, relayDomain, getToken, parent,
   // the hide, and make it after.
   const sync = () => {
     const was = shown;
-    shown = computeVisible({ open: true, overlayActive: overlay, inactive, bounds: rect });
+    shown = loaded && computeVisible({ open: true, overlayActive: overlay, inactive, bounds: rect });
     const reclaim = !shown && holdsFocus();
     for (const v of crew.views()) v.setVisible(shown);
     if (reclaim) handBack();
@@ -569,6 +606,8 @@ function openRelayCrewPane({ endpointId, crewUrl, relayDomain, getToken, parent,
     parent.removeListener("closed", close);
     for (const event of dashboardEvents) dashboard.webContents.removeListener(event, close);
     openPanes.delete(endpointId);
+    for (const timer of [backstop, probe, handoff]) if (timer) clearTimeout(timer);
+    backstop = probe = handoff = null;
     try { parent.contentView.removeChildView(view); } catch { /* mid-teardown */ }
     crew.teardown("pane");
     if (reclaim) handBack();
@@ -581,6 +620,39 @@ function openRelayCrewPane({ endpointId, crewUrl, relayDomain, getToken, parent,
     if (!isClosed() && !shown && parent.isFocused()) handBack();
   }));
   wc.on("before-input-event", readChord);
+  // The page's theme, so the local top bar above it can match (the page has no
+  // preload to say so itself).
+  const markLoaded = () => {
+    if (backstop) { clearTimeout(backstop); backstop = null; }
+    if (probe) { clearTimeout(probe); probe = null; }
+    if (loaded || isClosed()) return;
+    loaded = true;
+    // Only a pane the dashboard already asked to show has anything to change.
+    if (!inactive) sync();
+    handoff = setTimeout(() => { handoff = null; crew.notify(loadedListeners); }, PANE_COVER_HANDOFF_MS);
+  };
+  // Any page answers this, an older host's included; a page could answer true
+  // early, and all that does is show its own pane sooner.
+  const probeRoot = () => {
+    probe = null;
+    if (loaded || isClosed()) return;
+    Promise.resolve(wc.executeJavaScript(PANE_ROOT_PROBE)).then((drawn) => {
+      if (drawn === true) markLoaded();
+      else if (!loaded && !isClosed()) probe = setTimeout(probeRoot, PANE_ROOT_PROBE_MS);
+    }, () => {});
+  };
+  // Both console-message shapes: the details object (newer Electron) and (event, level, message).
+  wc.on("console-message", (details, _level, message) => {
+    const text = details && typeof details.message === "string" ? details.message : message;
+    if (text === RELAY_PANE_PAINTED) markLoaded();
+  });
+  wc.once("did-finish-load", () => {
+    if (loaded) return;
+    backstop = setTimeout(markLoaded, PANE_PAINT_BACKSTOP_MS);
+    probeRoot();
+  });
+  wc.once("did-fail-load", markLoaded);
+  wc.on("did-change-theme-color", (_event, color) => crew.notify(themeListeners, isDarkThemeColor(color)));
   setBounds(bounds);
 
   const handle = {
@@ -603,6 +675,8 @@ function openRelayCrewPane({ endpointId, crewUrl, relayDomain, getToken, parent,
     setOverlay: (active) => { if (isClosed()) return; overlay = active === true; sync(); },
     setInactive: (value) => { if (isClosed()) return; inactive = value === true; sync(); },
     onChord: (cb) => { chordListeners.push(cb); },
+    onThemeDark: (cb) => { themeListeners.push(cb); },
+    onLoaded: (cb) => { loadedListeners.push(cb); },
   };
   openPanes.set(endpointId, handle);
   Promise.resolve(wc.loadURL(`${parts.origin}/`)).catch(() => crew.log("first load failed"));
@@ -629,5 +703,7 @@ module.exports = {
   createRelayCrewView,
   openRelayCrewWindow,
   paneChordIndex,
+  isDarkThemeColor,
+  RELAY_PANE_PAINTED,
   openRelayCrewPane,
 };

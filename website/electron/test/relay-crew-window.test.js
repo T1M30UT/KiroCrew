@@ -9,6 +9,8 @@ const {
   openRelayCrewWindow,
   openRelayCrewPane,
   paneChordIndex,
+  isDarkThemeColor,
+  RELAY_PANE_PAINTED,
   shownRelayPane,
 } = require("../relay-crew-window");
 
@@ -75,8 +77,13 @@ function fakeDeps() {
       this.webContents.isFocused = () => this.webContents.hasFocus;
       this.webContents.focus = () => { this.webContents.hasFocus = true; };
       this.webContents.isDestroyed = () => this.webContents.closed;
+      // What the page's root probe answers (an older host's page has no painted line).
+      this.webContents.rootDrawn = false;
+      this.webContents.probes = 0;
+      this.webContents.executeJavaScript = () => { this.webContents.probes += 1; return Promise.resolve(this.webContents.rootDrawn); };
       this.visible = true;
       this.setVisible = (v) => { this.visible = v; };
+      this.setBackgroundColor = (c) => { this.background = c; };
       this.setBounds = (b) => { this.bounds = b; };
       views.push(this);
     }
@@ -643,7 +650,10 @@ function openPane(f, extra = {}) {
     endpointId: ENDPOINT, crewUrl: CREW_URL, relayDomain: DOMAIN, getToken: () => TOKEN,
     parent, dashboard, bounds: PANE_RECT, platform: "linux",
   }, f.deps);
-  return { parent, dashboard, handle, view: f.views[f.views.length - 1] };
+  const view = f.views[f.views.length - 1];
+  // The page drew the app, so the pane may show; `unloaded` keeps it before that.
+  if (!extra.unloaded) view.webContents.emit("console-message", { message: RELAY_PANE_PAINTED });
+  return { parent, dashboard, handle, view };
 }
 
 test("pane: built by the window's own view factory, so its isolation is the window's", () => {
@@ -875,6 +885,111 @@ test("pane: main reads the Crew-switch chord before the page and reports its tab
   assert.strictEqual(paneChordIndex({ type: "keyDown", control: true, code: "Digit3" }, "darwin"), -1);
   assert.strictEqual(paneChordIndex({ type: "keyUp", control: true, code: "Digit3" }, "linux"), -1);
   assert.strictEqual(paneChordIndex(null, "linux"), -1);
+  p.handle.close();
+});
+
+test("pane: stays hidden until its page has drawn the app, even in front, then shows and says so (row 73)", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const painted = [
+    ["the painted line", (wc) => wc.emit("console-message", { message: RELAY_PANE_PAINTED })],
+    ["the painted line, older event shape", (wc) => wc.emit("console-message", {}, 1, RELAY_PANE_PAINTED)],
+    ["a failed load", (wc) => wc.emit("did-fail-load")],
+  ];
+  for (const [what, happen] of painted) {
+    const f = fakeDeps();
+    const p = openPane(f, { unloaded: true });
+    let told = 0;
+    p.handle.onLoaded(() => { told += 1; });
+    p.handle.setInactive(false);
+    p.view.webContents.emit("dom-ready");
+    p.view.webContents.emit("console-message", { message: "something else" });
+    assert.strictEqual(p.view.visible, false, "a parsed but undrawn page never shows");
+    happen(p.view.webContents);
+    assert.strictEqual(p.view.visible, true, `${what} shows it`);
+    happen(p.view.webContents);
+    t.mock.timers.tick(250);
+    assert.strictEqual(told, 1, "once");
+    p.handle.close();
+  }
+  const f = fakeDeps();
+  const p = openPane(f, { unloaded: true });
+  p.handle.setInactive(false);
+  p.handle.showNotice(PANE_NOTICE);
+  assert.strictEqual(f.views[1].visible, true, "a notice in place of the page shows");
+  p.handle.close();
+});
+
+test("pane: the painted line is the one the dashboard prints", () => {
+  const src = require("node:fs").readFileSync(require("node:path").join(__dirname, "..", "..", "src", "lib", "relayPanePainted.ts"), "utf8");
+  assert.ok(src.includes(`export const RELAY_PANE_PAINTED = '${RELAY_PANE_PAINTED}'`));
+});
+
+test("pane: a page that never says it drew (an older host) shows a while after its load finished", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fakeDeps();
+  const p = openPane(f, { unloaded: true });
+  p.handle.setInactive(false);
+  p.view.webContents.emit("did-finish-load");
+  t.mock.timers.tick(2999);
+  assert.strictEqual(p.view.visible, false);
+  t.mock.timers.tick(1);
+  assert.strictEqual(p.view.visible, true);
+  p.handle.close();
+  const g = fakeDeps();
+  const q = openPane(g, { unloaded: true });
+  let told = 0;
+  q.handle.onLoaded(() => { told += 1; });
+  q.view.webContents.emit("did-finish-load");
+  q.handle.close();
+  t.mock.timers.tick(5000);
+  assert.strictEqual(told, 0, "a closed pane's backstop does nothing");
+});
+
+test("pane: an older host's page shows once its root holds text, not 3 s after load (row 73)", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const flush = () => new Promise((resolve) => setImmediate(resolve));
+  const f = fakeDeps();
+  const p = openPane(f, { unloaded: true });
+  p.handle.setInactive(false);
+  p.view.webContents.emit("did-finish-load");
+  await flush();
+  assert.strictEqual(p.view.visible, false, "an empty root keeps it hidden");
+  p.view.webContents.rootDrawn = true;
+  t.mock.timers.tick(100);
+  await flush();
+  assert.strictEqual(p.view.visible, true, "the next probe shows it");
+  const probes = p.view.webContents.probes;
+  t.mock.timers.tick(5000);
+  await flush();
+  assert.strictEqual(p.view.webContents.probes, probes, "no probe after it showed");
+  p.handle.close();
+});
+
+test("pane: its view is clear and the cover goes only after it shows, so no black shows between (row 73)", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const f = fakeDeps();
+  const p = openPane(f, { unloaded: true });
+  assert.strictEqual(p.view.background, "#00000000");
+  const told = [];
+  p.handle.onLoaded(() => told.push(p.view.visible));
+  p.handle.setInactive(false);
+  p.view.webContents.emit("console-message", { message: RELAY_PANE_PAINTED });
+  assert.strictEqual(p.view.visible, true);
+  assert.deepStrictEqual(told, [], "the cover stays while the pane's first frame lands");
+  t.mock.timers.tick(250);
+  assert.deepStrictEqual(told, [true]);
+  p.handle.close();
+});
+
+test("pane: reports whether its page's theme colour is dark, and only that", () => {
+  const f = fakeDeps();
+  const p = openPane(f);
+  const seen = [];
+  p.handle.onThemeDark((dark) => seen.push(dark));
+  for (const color of ["#0d0d0d", "#FAFAFA", null, "rgb(0,0,0)", "#123"]) p.view.webContents.emit("did-change-theme-color", {}, color);
+  assert.deepStrictEqual(seen, [true, false, null, null, null]);
+  assert.strictEqual(isDarkThemeColor("#7f7f7f"), true);
+  assert.strictEqual(isDarkThemeColor("#808080"), false);
   p.handle.close();
 });
 
