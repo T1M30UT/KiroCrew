@@ -1226,7 +1226,7 @@ class TestResourceStatusTool:
     def test_a_blocked_floor_outranks_the_kernel_pressure_guidance(self) -> None:
         out = self._run("ample", spawn_avail=1.8, pressure_held=True)
         assert "Guidance: new top-level subagents cannot start now" in out
-        assert "macOS reports memory pressure" not in out
+        assert "macOS memory is under pressure" not in out
 
     @pytest.mark.parametrize("remote", [True, False])
     def test_the_caller_placement_reaches_the_floor_reading(self, remote: bool) -> None:

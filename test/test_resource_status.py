@@ -1075,7 +1075,7 @@ def test_ample_figure_under_pressure_still_injects_a_line(monkeypatch) -> None:
     _pressure(monkeypatch, platform_compat.MEMORY_PRESSURE_WARN)
     line = rs.probe(_cfg(4.0, 2.0)).context_line()
     assert line.startswith("[RESOURCES] Host memory reads ~8.0 GB free")
-    assert "macOS reports memory pressure (WARN)" in line
+    assert "macOS memory is under pressure (WARN)" in line
     assert rs.PRESSURE_QUEUE_NOTE in line
 
 
@@ -1084,7 +1084,7 @@ def test_pressure_rides_a_tight_line_as_a_clause(monkeypatch) -> None:
     _pressure(monkeypatch, platform_compat.MEMORY_PRESSURE_CRITICAL)
     line = rs.probe(_cfg(4.0, 2.0)).context_line()
     assert line.startswith("[RESOURCES] Host memory is tight")
-    assert "macOS reports memory pressure (CRITICAL)" in line
+    assert "macOS memory is under pressure (CRITICAL)" in line
 
 
 @pytest.mark.parametrize("level", [None, 1])
@@ -1128,7 +1128,7 @@ def test_tool_guidance_never_says_heavy_work_is_fine_under_pressure(monkeypatch)
     out = mcp_core._call_tool_inner("resource_status", {})
     assert "Posture: AMPLE" in out
     assert "Kernel memory pressure: WARN" in out
-    assert "Guidance: macOS reports memory pressure — prefer the lighter path" in out
+    assert "Guidance: macOS memory is under pressure — prefer the lighter path" in out
     # The queue note is said once, on the level line, not again in the guidance.
     assert out.count(rs.PRESSURE_QUEUE_NOTE) == 1
     assert "nothing is reserved" not in out
@@ -1149,7 +1149,7 @@ def test_an_unreadable_figure_under_pressure_still_injects_a_line(monkeypatch) -
     _pressure(monkeypatch, platform_compat.MEMORY_PRESSURE_WARN)
     line = rs.probe(_cfg(4.0, 2.0)).context_line()
     assert line.startswith("[RESOURCES] Host memory reads an unreadable figure")
-    assert "macOS reports memory pressure (WARN)" in line
+    assert "macOS memory is under pressure (WARN)" in line
 
 
 def test_an_unreadable_level_on_macos_is_reported_once(monkeypatch, caplog) -> None:

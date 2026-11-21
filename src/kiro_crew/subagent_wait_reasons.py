@@ -46,15 +46,15 @@ QUEUED_REASON_MEMORY_PRESSURE = "memory_pressure"
 
 #: The words every surface opens a kernel memory-pressure report with: the
 #: held start's detail, the ``[RESOURCES]`` line and the ``resource_status`` tool.
-MEMORY_PRESSURE_PHRASE = "macOS reports memory pressure"
+MEMORY_PRESSURE_PHRASE = "macOS memory is under pressure"
 #: Seconds between re-checks of starts the pressure hold keeps, when no slot
 #: release re-checks them sooner.
 MEMORY_PRESSURE_RECHECK_SECS = 15
 #: The held start's detail: the chip, ``POST /api/spawn`` and ``spawn_run`` relay
 #: it as the reason the start has not begun.
 MEMORY_PRESSURE_DETAIL = (
-    f"{MEMORY_PRESSURE_PHRASE}; waiting until it eases or the running agents "
-    f"finish (re-checked every {MEMORY_PRESSURE_RECHECK_SECS} s)"
+    f"{MEMORY_PRESSURE_PHRASE}; close other apps to start sooner "
+    f"(retries every {MEMORY_PRESSURE_RECHECK_SECS} s)"
 )
 
 #: The kinds a caller is told ``queued`` for (rather than ``spawned``): the row
@@ -108,7 +108,7 @@ __all__ = [
 #: gate's own sentence: a capacity wait, or a deferral already past its admit
 #: wait and not yet re-checked.
 QUEUED_KIND_TEXT: dict[str, str] = {
-    QUEUED_REASON_LOW_MEMORY: "not enough free memory to start it",
+    QUEUED_REASON_LOW_MEMORY: "not enough free memory; close other apps to free some",
     QUEUED_REASON_CONCURRENCY_LIMIT: "waiting for a free slot behind the concurrency limit",
     # A held row has no ``deferred`` event; the hold is read live, so its kind
     # carries the gate's own sentence.

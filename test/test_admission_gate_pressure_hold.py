@@ -282,7 +282,7 @@ class TestSpawnAdmissionGatePressureHold(_TestSpawnAdmissionGateHarness):
 
         def warnings() -> int:
             return sum(
-                r.levelno == logging.WARNING and "macOS reports memory pressure" in r.getMessage()
+                r.levelno == logging.WARNING and "macOS memory is under pressure" in r.getMessage()
                 for r in caplog.records
             )
 

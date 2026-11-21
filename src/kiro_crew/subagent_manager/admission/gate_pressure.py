@@ -305,7 +305,7 @@ def _memory_pressure_holds_impl(
                 " (figure unreadable)" if unreadable else f" ({available_gb:.2f} GB reclaimable)"
             )
         log(
-            "Subagent %s held: macOS reports memory pressure (%s) while a dedicated "
+            "Subagent %s held: macOS memory is under pressure (%s) while a dedicated "
             "subagent of this gateway is running%s",
             agent_id,
             name,
