@@ -257,10 +257,13 @@ def _declared_env_launch_approved(pool_key: PoolKey, pairs: dict[str, str]) -> b
     """
     if not pairs:
         return True
-    if _launch_approved_from_snapshot(
-        pool_key.server_name,
-        pool_key.command_args_hash,
-        launch_approval.env_fingerprint(pairs),
+    # The legacy identity too: an approval stored before the PATH fold stays
+    # valid here until the gateway saves its folded pair.
+    if any(
+        _launch_approved_from_snapshot(
+            pool_key.server_name, pool_key.command_args_hash, env_identity
+        )
+        for env_identity in launch_approval.env_fingerprints(pairs)
     ):
         return True
     logger.warning(
@@ -457,6 +460,16 @@ def _approval_env_identity(pool_key: PoolKey) -> str:
 
     BLOCKING: reads a file. Callers must run it off the event loop.
     """
+    return _approval_env_identities(pool_key)[0]
+
+
+def _approval_env_identities(pool_key: PoolKey) -> tuple[str, ...]:
+    """:func:`_approval_env_identity`, then its legacy form when that differs.
+
+    The legacy form (``launch_approval.legacy_env_fingerprint``) matches an
+    approval stored before the gateway's ``PATH`` part was folded, until the
+    gateway saves the folded pair. BLOCKING, like that function.
+    """
     identity_keys = facade.pool_identity_env_keys()
     coherent = [pairs for pairs in _coherent_env_sidecars(pool_key, identity_keys) if pairs]
     # Sorted items, because a dict is unhashable and two sidecars written from
@@ -465,8 +478,8 @@ def _approval_env_identity(pool_key: PoolKey) -> str:
     if len(distinct) == 1:
         # The verified contents, not a re-read of the file they came from: a
         # second read could pick up a replacement that no hash ever covered.
-        return launch_approval.env_fingerprint(coherent[0])
-    return pool_key.effective_env_hash
+        return launch_approval.env_fingerprints(coherent[0])
+    return (pool_key.effective_env_hash,)
 
 
 def _launch_approved_from_snapshot(
@@ -808,10 +821,10 @@ def env_target_resolver(pool_key: PoolKey) -> Optional[tuple[str, list[str], dic
     # approved for this name (``launch_approval``). ``None`` is the clean
     # "no target" rejection, so the stub falls back to a launch inside the
     # session sandbox. Fails closed on a missing or unreadable store.
-    if not _launch_approved_from_snapshot(
-        pool_key.server_name,
-        hash_command(command, args),
-        _approval_env_identity(pool_key),
+    command_hash = hash_command(command, args)
+    if not any(
+        _launch_approved_from_snapshot(pool_key.server_name, command_hash, env_identity)
+        for env_identity in _approval_env_identities(pool_key)
     ):
         logger.warning(
             "mcp-gateway: refusing to spawn %r: its launch is not an approved one",

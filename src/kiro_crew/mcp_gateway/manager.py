@@ -35,6 +35,7 @@ from kiro_crew.config.paths import config_dir
 from kiro_crew.env import mcp_runtime_path, resolve_krb5_ccname
 from kiro_crew.jsonl_util import rotate_jsonl_at
 from kiro_crew.mcp_gateway import agent_socket, backend_record, transport
+from kiro_crew.mcp_gateway.hashing import GATEWAY_PATH_ENV, gateway_path
 from kiro_crew.mcp_gateway.pool import READ_BUFFER_LIMIT_BYTES
 from kiro_crew.mcp_gateway.shutdown_budget import TOTAL_SHUTDOWN_BUDGET_SECS
 from kiro_crew.metrics.events import (
@@ -862,6 +863,10 @@ class GatewayManager:
         env.pop(BACKEND_WORK_DIR_ENV, None)
         if self._spec.backend_work_dir:
             env[BACKEND_WORK_DIR_ENV] = self._spec.backend_work_dir
+        # The PATH part this gateway appends to declared spec PATHs, so the
+        # daemon folds it out of launch approvals as the rewriter does
+        # (``hashing.gateway_path``). Computed before PATH is rewritten below.
+        env[GATEWAY_PATH_ENV] = await asyncio.to_thread(gateway_path)
         # Repair the Kerberos ccache pointer for pooled MCP backends so a
         # long-lived background daemon's forked children inherit a usable
         # ticket for any credential-gated MCP server. Off the loop: it stats

@@ -1469,6 +1469,19 @@ the encoding is accepted. Two installs sharing one data home (the desktop app an
 dev venv, say) therefore admit each other's approvals of a `python3`-pinned
 launch, since each reads the alias as its own interpreter; that widens nothing,
 because each gateway already runs as the user on that interpreter.
+The env half also folds the gateway's own part of a declared `PATH`: the part
+`env.spec_env_path` appends after the spec's own entries
+(`env.gateway_spec_path`). A `PATH` value that is exactly that composition hashes
+as its own entries plus a `gateway-path` alias (`hashing.hash_launch_env`), so a
+re-rendered service unit or a package installer that changes the gateway's own
+`PATH` pauses no share. The spec's own entries still count, any other `PATH`
+hashes as written, and the pool key keeps the real `PATH`. The manager hands
+gatewayd the gateway's part (`KIROCREW_MCP_GATEWAY_PATH`), because the daemon's
+own `PATH` is rewritten at spawn. An approval stored before the fold is carried
+over by the next rewrite pass, matched by its literal digest or by the `PATH` its
+approved display shows (`launch_approval.legacy_identities`), and gatewayd
+accepts the literal identity until that pass is saved. Security detail:
+[security.md](../system-specs/modules/security.md#mcp-launch-authorization-leaves).
 An absent or empty store approves nothing. A stub
 without a matching fingerprint stays on the session's unpooled, sandboxed launch
 path. A queued cold spawn reloads the store after admission and resolves the same

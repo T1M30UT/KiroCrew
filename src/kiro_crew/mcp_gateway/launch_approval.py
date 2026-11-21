@@ -55,7 +55,12 @@ from pathlib import Path
 from typing import Any, Collection, Iterable, Mapping
 
 from kiro_crew.config.paths import config_dir
-from kiro_crew.mcp_gateway.hashing import hash_command, hash_declared_env
+from kiro_crew.mcp_gateway.hashing import (
+    gateway_path,
+    hash_command,
+    hash_declared_env,
+    hash_launch_env,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -141,9 +146,26 @@ def _coerced_env(env_pairs: Mapping[Any, Any] | None) -> dict[str, str]:
 def env_fingerprint(env_pairs: Mapping[Any, Any] | None) -> str:
     """Hash of the complete declared env block gatewayd may apply.
 
-    Secret-prefixed entries count too: private backends receive them.
+    Secret-prefixed entries count too: private backends receive them. The
+    gateway's own part of ``PATH`` does not (``hashing.hash_launch_env``).
+    """
+    return hash_launch_env(_coerced_env(env_pairs))
+
+
+def legacy_env_fingerprint(env_pairs: Mapping[Any, Any] | None) -> str:
+    """:func:`env_fingerprint` as a store written before the ``PATH`` fold has it.
+
+    Read only to carry such an approval over (``LaunchApprovals.admit``) and by
+    gatewayd until the gateway saves the carried pair.
     """
     return hash_declared_env(_coerced_env(env_pairs))
+
+
+def env_fingerprints(env_pairs: Mapping[Any, Any] | None) -> tuple[str, ...]:
+    """Every env identity gatewayd accepts for *env_pairs*: folded, then legacy."""
+    folded = env_fingerprint(env_pairs)
+    legacy = legacy_env_fingerprint(env_pairs)
+    return (folded,) if legacy == folded else (folded, legacy)
 
 
 def launch_pair(command_hash: str, derived_env_hash: str) -> str:
@@ -161,6 +183,65 @@ def launch_fingerprint(
 ) -> str:
     """``<command hash>:<env hash>`` for one launch."""
     return f"{hash_command(command, list(args))}:{env_fingerprint(env_pairs)}"
+
+
+def legacy_launch_fingerprint(
+    command: str, args: Iterable[str], env_pairs: Mapping[Any, Any] | None = None
+) -> str:
+    """:func:`launch_fingerprint` with :func:`legacy_env_fingerprint`."""
+    return f"{hash_command(command, list(args))}:{legacy_env_fingerprint(env_pairs)}"
+
+
+def legacy_identities(
+    approvals: LaunchApprovals,
+    name: str,
+    command: str,
+    args: list[str],
+    env: Mapping[str, Any],
+    expanded: Mapping[str, Any],
+) -> list[tuple[str, str]]:
+    """The ``(fingerprint, derived env hash)`` pairs a pre-fold store may hold.
+
+    First the launch hashed literally. Then, for each ``PATH`` value shown in
+    clear in an approved display of the same command (the gateway's own part
+    of it may have moved since), the launch with that old ``PATH``: it is
+    offered only when the current ``PATH`` folds and its own entries lead the
+    old value, so the spec's own entries and every other key still have to
+    match the approval by full hash. A redacted or cut display hashes to
+    nothing stored and carries nothing.
+    """
+    from kiro_crew.env import spec_path_own_entries
+
+    out = [
+        (
+            legacy_launch_fingerprint(command, args, env),
+            legacy_env_fingerprint(expanded),
+        )
+    ]
+    current = env.get("PATH")
+    if not isinstance(current, str):
+        return out
+    own = spec_path_own_entries(current, gateway_path())
+    if own is None:
+        return out
+    command_hash = hash_command(command, list(args))
+    displays = approvals.approved_displays.get(target_stem(name), {})
+    for pair, (_command_display, env_display) in sorted(displays.items()):
+        if _split(pair)[0] != command_hash:
+            continue
+        for line in env_display:
+            if not line.startswith("PATH="):
+                continue
+            old = line[len("PATH=") :]
+            if old == current or old.split(os.pathsep)[: len(own)] != own:
+                continue
+            out.append(
+                (
+                    legacy_launch_fingerprint(command, args, {**env, "PATH": old}),
+                    legacy_env_fingerprint({**expanded, "PATH": old}),
+                )
+            )
+    return out
 
 
 def _split(fingerprint: str) -> tuple[str, str]:
@@ -225,6 +306,9 @@ class LaunchApprovals:
     #: The approved pairs a stem held before this pass rebound any of them, so
     #: a save can tell whether the store moved underneath the pass.
     rebind_base: dict[str, frozenset[str]] = field(default_factory=dict)
+    #: Folded fingerprints this pass recorded for an approval stored before the
+    #: ``PATH`` fold (stem -> fingerprints), for the audit line.
+    carried: dict[str, set[str]] = field(default_factory=dict)
     #: Additional redacted display argv found by the final target filter.
     refused_commands: dict[str, list[list[str]]] = field(default_factory=dict)
     #: Every approval identity and its redacted command/env displays seen this pass.
@@ -397,6 +481,37 @@ class LaunchApprovals:
         self.live_overflow.setdefault(stem, set()).add(identity)
         return _launch_displays(launch, env)
 
+    def _carry_legacy(
+        self,
+        stem: str,
+        name: str,
+        fingerprint: str,
+        derived_env_hash: str,
+        launch: tuple[str, list[str]] | None,
+        env: Mapping[str, Any] | None,
+    ) -> bool:
+        """Record the folded digests of a launch the store approved before the fold.
+
+        The store holds this exact launch's digests from before the gateway's
+        own ``PATH`` part was folded, so the folded pair names the same
+        approved launch. Saved beside the old pair (:func:`save_pass`), so the
+        approval keeps holding after the gateway's ``PATH`` changes.
+        """
+        identity = launch_pair(_split(fingerprint)[0], derived_env_hash)
+        additions: list[tuple[Mapping[str, Collection[Any]], Collection[Any]]] = [
+            (self.approved, (fingerprint,)),
+            (self.approved_pairs, (identity,)),
+            (self.captured, (fingerprint,)),
+        ]
+        if not self._admission_allowed(stem, name, additions):
+            return False
+        command_display, env_display, complete = self._note_live(stem, identity, launch, env)
+        self._record(stem, name, fingerprint, derived_env_hash, launch, env)
+        self.carried.setdefault(stem, set()).add(fingerprint)
+        if complete and command_display is not None and env_display is not None:
+            self.approved_displays.setdefault(stem, {})[identity] = (command_display, env_display)
+        return True
+
     def admit(
         self,
         name: str,
@@ -406,6 +521,7 @@ class LaunchApprovals:
         launch: tuple[str, list[str]] | None = None,
         env: Mapping[str, Any] | None = None,
         derived_env_hash: str,
+        legacy: Iterable[tuple[str, str]] = (),
     ) -> bool:
         """Whether *name* may launch *fingerprint* outside the sandbox.
 
@@ -413,7 +529,9 @@ class LaunchApprovals:
         ``kirocrew-*`` server repaired to the managed invocation): it is
         recorded without needing an operator approval, because nothing
         agent-writable chose it. ``launch`` is the ``(command, args)`` behind
-        the fingerprint, kept for a probe pass to report.
+        the fingerprint, kept for a probe pass to report. ``legacy`` holds the
+        ``(fingerprint, derived env hash)`` pairs a store written before the
+        ``PATH`` fold would hold for this launch (:func:`legacy_identities`).
         """
         stem = target_stem(name)
         command_hash, _declared_env_hash = _split(fingerprint)
@@ -428,6 +546,16 @@ class LaunchApprovals:
         ):
             self._note_live(stem, identity, launch, env)
             return True
+        if (
+            not self.probe
+            and not managed
+            and any(
+                old_fp in self.approved.get(stem, ())
+                and self.admits_launch(stem, command_hash, old_env)
+                for old_fp, old_env in legacy
+            )
+        ):
+            return self._carry_legacy(stem, name, fingerprint, derived_env_hash, launch, env)
         # The operator approved this exact declared launch -- resolved command,
         # args and the env text with its ``${VAR}`` references unexpanded -- and
         # only the expansion moved. Those values come from the gateway process
@@ -1016,6 +1144,8 @@ def _pairs_under(pairs: Iterable[str], command_hash: str) -> set[str]:
 
 #: Audit reason for a pair admitted because only a ``${VAR}`` value changed.
 REBIND_AUDIT_REASON = "approved launch, ${VAR} value changed"
+#: Audit reason for the folded pair of a launch approved before the ``PATH`` fold.
+CARRY_AUDIT_REASON = "approved launch, gateway PATH part folded"
 
 
 def _settle_rebinds(
@@ -1175,8 +1305,14 @@ def _captured_by_reason(approvals: LaunchApprovals) -> dict[str, dict[str, set[s
     by_reason: dict[str, dict[str, set[str]]] = {}
     for stem, fps in approvals.captured.items():
         rebound = set(approvals.rebound.get(stem, {}).values())
+        carried = approvals.carried.get(stem, set())
         for fingerprint in fps:
-            reason = REBIND_AUDIT_REASON if fingerprint in rebound else "managed launch"
+            if fingerprint in rebound:
+                reason = REBIND_AUDIT_REASON
+            elif fingerprint in carried:
+                reason = CARRY_AUDIT_REASON
+            else:
+                reason = "managed launch"
             by_reason.setdefault(reason, {}).setdefault(stem, set()).add(fingerprint)
     return by_reason
 

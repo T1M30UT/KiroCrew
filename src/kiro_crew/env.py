@@ -1100,8 +1100,44 @@ def spec_env_path(env_path: str) -> str:
     if not isinstance(env_path, str):
         logger.debug("ignoring non-string MCP spec PATH: %s", type(env_path).__name__)
         env_path = ""
-    parts = [*_spec_path_entries(env_path), augmented_path(os.environ.get("PATH", ""))]
-    return dedup_path(os.pathsep.join(filter(None, parts)))
+    return _joined_spec_path(_spec_path_entries(env_path), gateway_spec_path())
+
+
+def gateway_spec_path() -> str:
+    """The part of an expanded spec ``PATH`` that comes from this process.
+
+    :func:`spec_env_path` appends it after the spec's own entries. It is this
+    process's own ``PATH`` plus the well-known MCP directories, so it moves when
+    the service unit is re-rendered or a package installer adds a version
+    directory, while the spec's own entries stay as written. The launch
+    approval hash (``mcp_gateway.hashing``) reads it from here, so the writer
+    and the hash use one composition.
+    """
+    return augmented_path(os.environ.get("PATH", ""))
+
+
+def _joined_spec_path(own: list[str], gateway_part: str) -> str:
+    return dedup_path(os.pathsep.join(filter(None, [*own, gateway_part])))
+
+
+def spec_path_own_entries(value: str, gateway_part: str) -> list[str] | None:
+    """The spec's own leading entries of an expanded *value*, or ``None``.
+
+    The shortest prefix of *value* that :func:`spec_env_path`, given
+    *gateway_part* as this process's part, expands back to exactly *value*.
+    ``None`` when no prefix does, so *value* is not this composition (a
+    hand-written ``PATH``, or one expanded under another gateway ``PATH``).
+    Shortest, so a spec entry that also leads *gateway_part* in the same order
+    counts as the gateway's; that can only cost a re-approval later, since the
+    child's ``PATH`` is the same either way.
+    """
+    if not gateway_part:
+        return None
+    entries = value.split(os.pathsep)
+    for k in range(len(entries) + 1):
+        if _joined_spec_path(entries[:k], gateway_part) == value:
+            return entries[:k]
+    return None
 
 
 def mcp_search_path(env_path: str) -> str:

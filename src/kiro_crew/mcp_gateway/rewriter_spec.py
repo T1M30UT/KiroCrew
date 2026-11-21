@@ -41,6 +41,7 @@ from kiro_crew.mcp_gateway.launch_approval import (
     LaunchApprovals,
     env_fingerprint,
     launch_fingerprint,
+    legacy_identities,
     target_stem,
 )
 from kiro_crew.mcp_gateway.rewriter_env import (
@@ -1126,7 +1127,16 @@ def _admit_launch(
         return True
     target_args = _spec_args(entry)
     fingerprint = launch_fingerprint(resolved_cmd, target_args, entry_env)
-    derived_env_hash = env_fingerprint(_expand_env_map(entry_env))
+    expanded_env = _expand_env_map(entry_env)
+    derived_env_hash = env_fingerprint(expanded_env)
+    # What a store written before the PATH fold holds for this launch.
+    legacy = [
+        old
+        for old in legacy_identities(
+            approvals, name, resolved_cmd, target_args, entry_env, expanded_env
+        )
+        if old != (fingerprint, derived_env_hash)
+    ]
     if not approvals.admit(
         name,
         fingerprint,
@@ -1136,6 +1146,7 @@ def _admit_launch(
         # host secret behind ``${VAR}`` is never rendered on the dashboard.
         env=entry_env,
         derived_env_hash=derived_env_hash,
+        legacy=legacy,
     ):
         # Names only: the args and env may carry tokens.
         if approvals.refused.get(target_stem(name)) == REFUSED_TOO_MANY:
